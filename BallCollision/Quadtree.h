@@ -26,7 +26,8 @@ class Quadtree
 public:
 	Quadtree(const Rect& rect, int depth = 0) : rect(rect), depth(depth) {}
 
-	const std::vector<Quadtree>& GetChildren() const { return children; }
+	std::vector<Quadtree>& GetChildren() { return children; }
+	std::vector<IQuadFitable*>& GetObjects() { return objects; }
 	const Rect& GetRect() const { return rect; }
 
 	bool Insert(IQuadFitable* obj)
@@ -50,7 +51,8 @@ public:
 			// quadtree is oversized - split it in 4
 			Split();
 
-			// spread objects across created subquads
+			// spread objects across created subquads.
+			// leave in parent if doesnt fully fit anywhere
 			objects.erase(
 				std::remove_if(objects.begin(), objects.end(),
 					[&](IQuadFitable* obj)

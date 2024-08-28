@@ -1,6 +1,7 @@
 #include "SFML/Graphics.hpp"
 #include "MiddleAverageFilter.h"
 #include "Quadtree.h"
+#include "utils.h"
 
 constexpr int WINDOW_X = 1024;
 constexpr int WINDOW_Y = 768;
@@ -11,12 +12,13 @@ Math::MiddleAverageFilter<float,100> fpscounter;
 
 class Ball : public IQuadFitable
 {
-    sf::Vector2f p;
-    sf::Vector2f dir;
-    float r = 0;
-    float speed = 0;
-
 public:
+    sf::Vector2f p;
+    float r = 0;
+    sf::Vector2f dir;
+    float speed = 0;
+    float mass = 0;
+
     Ball(int posX, int posY, int dirX, int dirY, int r, int speed)
     {
         p.x = posX;
@@ -25,7 +27,10 @@ public:
         dir.y = dirY;
         this->r = r;
         this->speed = speed;
+        mass = r;
     }
+
+    sf::Vector2f GetSpeedVec() { return dir * speed; }
 
     void Draw(sf::RenderWindow& window) const
     {
@@ -45,8 +50,7 @@ public:
 
     bool IsFitsTheRect(const Rect& rect) const override
     {
-        // fix
-        return p.x > rect.x && p.x < rect.x + rect.width && p.y > rect.y && p.y < rect.y + rect.height;
+        return p.x - r > rect.x && p.x + r < rect.x + rect.width && p.y - r > rect.y && p.y + r < rect.y + rect.height;
     }
 };
 
@@ -59,9 +63,9 @@ void draw_fps(sf::RenderWindow& window, float fps)
     window.setTitle(str);
 }
 
-void draw_quadtree(sf::RenderWindow& window, const Quadtree& quadtree)
+void draw_quadtree(sf::RenderWindow& window, Quadtree& quadtree)
 {
-    for (const auto& childQuad : quadtree.GetChildren())
+    for (auto& childQuad : quadtree.GetChildren())
         draw_quadtree(window, childQuad);
 
     auto rect = quadtree.GetRect();
@@ -74,6 +78,84 @@ void draw_quadtree(sf::RenderWindow& window, const Quadtree& quadtree)
     quad.setOutlineThickness(2);
 
     window.draw(quad);
+}
+
+void process_balls_collision(Ball* c1, Ball* c2)
+{
+    float distanceBetweenCenters = Math::length(c1->p - c2->p);
+    float maxDistancePossible = c1->r + c2->r;
+
+    if (distanceBetweenCenters <= maxDistancePossible)
+    {
+        // correct positions to avoid sticking
+        float error = maxDistancePossible - distanceBetweenCenters;
+        sf::Vector2f c1Toc2Dir = Math::normalized(c2->p - c1->p);
+        c1->p -= c1Toc2Dir * (error * 0.5f);
+        c2->p += c1Toc2Dir * (error * 0.5f);
+
+        sf::Vector2f v1 = ((c1->mass - c2->mass) * c1->GetSpeedVec() + 2 * c2->mass * c2->GetSpeedVec()) / (c1->mass + c2->mass);
+        sf::Vector2f v2 = ((c2->mass - c1->mass) * c2->GetSpeedVec() + 2 * c1->mass * c1->GetSpeedVec()) / (c1->mass + c2->mass);
+
+        c1->dir = Math::normalized(v1);
+        c1->speed = Math::length(v1);
+
+        c2->dir = Math::normalized(v2);
+        c2->speed = Math::length(v2);
+    }
+}
+
+void process_collisions_quadtree(Quadtree& quadtree)
+{
+    for (auto& subtree : quadtree.GetChildren())
+        process_collisions_quadtree(subtree);
+
+    // check intersection of every ball with every ball within quad
+    for (auto it1 = quadtree.GetObjects().begin(); it1 != quadtree.GetObjects().end(); it1++)
+    {
+        Ball* c1 = static_cast<Ball*>(*it1);
+
+        // screen border collision
+        if (c1->p.x - c1->r <= 0 || c1->p.x + c1->r >= WINDOW_X)
+            c1->dir = sf::Vector2f(-c1->dir.x, c1->dir.y);
+        if (c1->p.y - c1->r <= 0 || c1->p.y + c1->r >= WINDOW_Y)
+            c1->dir = sf::Vector2f(c1->dir.x, -c1->dir.y);
+
+        for (auto it2 = it1 + 1; it2 != quadtree.GetObjects().end(); it2++)
+        {
+            Ball* c2 = static_cast<Ball*>(*it2);
+            
+            process_balls_collision(c1, c2);
+        }
+
+        // if tree is splited then it only contains objects that couldn't fully fit in any subquad
+        // therefore check collision with objects from all subquads
+        for (auto& subtree : quadtree.GetChildren())
+        {
+            for (auto it2 = subtree.GetObjects().begin(); it2 != subtree.GetObjects().end(); it2++)
+            {
+                Ball* c2 = static_cast<Ball*>(*it2);
+
+                process_balls_collision(c1, c2);
+            }
+        }
+    }
+}
+
+// O(n^2) just for comparison
+void process_collisions_quadratic(std::vector<Ball>& balls)
+{
+    for (auto c1 = balls.begin(); c1 != balls.end(); c1++)
+    {
+        if (c1->p.x - c1->r <= 0 || c1->p.x + c1->r >= WINDOW_X)
+            c1->dir = sf::Vector2f(-c1->dir.x, c1->dir.y);
+        if (c1->p.y - c1->r <= 0 || c1->p.y + c1->r >= WINDOW_Y)
+            c1->dir = sf::Vector2f(c1->dir.x, -c1->dir.y);
+
+        for (auto c2 = c1 + 1; c2 != balls.end(); c2++)
+        {
+            process_balls_collision(&(*c1), &(*c2));
+        }
+    }
 }
 
 int main()
@@ -119,15 +201,9 @@ int main()
         fpscounter.push(1.0f / (current_time - lastime));
         lastime = current_time;
 
-        /// <summary>
-        /// TODO: PLACE COLLISION CODE HERE 
-        /// объекты создаются в случайном месте на плоскости со случайным вектором скорости, имеют радиус R
-        /// Объекты движутся кинетически. Пространство ограниченно границами окна
-        /// Напишите обработчик столкновений шаров между собой и краями окна. Как это сделать эффективно?
-        /// Массы пропорцианальны площадям кругов, описывающих объекты 
-        /// Как можно было-бы улучшить текущую архитектуру кода?
-        /// Данный код является макетом, вы можете его модифицировать по своему усмотрению
-        
+        process_collisions_quadtree(quadtree);
+        //process_collisions_quadratic(balls);  // just for comparison
+
         quadtree.Clear();
 
         for (auto& ball : balls)
